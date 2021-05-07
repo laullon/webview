@@ -4,10 +4,9 @@ package webview
 // xcrun --sdk macosx --show-sdk-path
 
 /*
-#cgo CFLAGS: -I.
-#cgo LDFLAGS: -L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/swift/ -L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/ -Lmacos/.build/debug -lwebview
-#include <stdlib.h>
-#include "webview.h"
+#cgo CFLAGS: -x objective-c
+#cgo LDFLAGS: -framework Foundation -framework WebKit -framework cocoa
+#include "macos/webview.m"
 */
 import "C"
 import (
@@ -15,8 +14,33 @@ import (
 	"net/http"
 )
 
+var jsGetJson = `
+var getJSON = function(url, callback) {
+    return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url);
+        xhr.onload = resolve;
+        xhr.onerror = reject;
+        xhr.send();
+    });
+};
+`
+
+var jsFunction = `
+function %s(arg) {
+    return new Promise(function (resolve, reject) {
+        getJSON('/cmd/%s?arg='+arg).then(function (e) {
+            console.log(e.target.response);
+            resolve(e.target.response)
+        }, function (e) {
+        // handle errors
+        });
+    });
+}`
+
 type WebView interface {
 	http.Handler
+
 	Run()
 	Navigate(url string)
 	Destroy()
@@ -33,7 +57,8 @@ type WebView interface {
 }
 
 func New(title string, w, h int) WebView {
-	C.sayHello()
+	C.StartApp()
+	C.bindFunction(C.CString(jsGetJson))
 	return &webview{
 		f: make(map[string]interface{}),
 	}
@@ -46,17 +71,18 @@ type webview struct {
 func (wv *webview) Run()                { C.run() }
 func (wv *webview) Navigate(url string) { C.navigate(C.CString(url)) }
 func (wv *webview) Destroy()            {}
-func (wv *webview) Eval(js string)      { C._evalJS(C.CString(js)) }
+func (wv *webview) Eval(js string)      { C.evalJS(C.CString(js)) }
 
 func (wv *webview) Bind(name string, f interface{}) error {
 	wv.f["/cmd/"+name] = f
-	C._bind(C.CString(name))
+	js := fmt.Sprintf(jsFunction, name, name)
+	C.bindFunction(C.CString(js))
 	return nil
 }
 
 func (wv *webview) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	cmd := req.URL.EscapedPath()
-	println("-->", cmd)
+	arg := req.URL.Query().Get("arg")
 	if f, ok := wv.f[cmd]; ok {
 		fmt.Printf("executing cmd '%s' (%T)\n", cmd, f)
 		switch cmdF := f.(type) {
@@ -66,6 +92,9 @@ func (wv *webview) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		case func() string:
 			resBody := cmdF()
 			res.Write([]byte(resBody))
+
+		case func(string):
+			cmdF(arg)
 
 		default:
 			fmt.Printf("[Error] cmd '%s' (%T) not supported.\n", cmd, f)
